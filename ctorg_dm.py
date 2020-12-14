@@ -19,7 +19,7 @@ import time
 import numpy
 
 from misc_utils import *
-from progressbar import *
+#from progressbar import *
 from sitk_utils import *
 
 class MlData(object):
@@ -168,22 +168,36 @@ class MlData(object):
             if len(s) == 0:
                 log.info('no label {} found for patient {}'.format(label, p))
                 continue
-            mask_file_name = s[0]['FileName']
-            imgFileName = os.path.join(self.tmpDir, p, 'img_' + label + '.nii.gz')
+
+            # image
+            imgFileName = os.path.join(self.tmpDir, p, 'resimg_' + label + '.nii.gz')
             if not os.path.exists(imgFileName) or force:
                 img = sitk.ReadImage(img_file_name)
                 img = resample(img)
                 sitk.WriteImage(img, imgFileName)
             else:
                 img = sitk.ReadImage(imgFileName)
-            maskFileName = os.path.join(self.tmpDir, p, 'mask_' + label + '.nii.gz')
+
+            # label file/mask
+            label_file_name = s[0]['FileName']
+            labelFileName = os.path.join(self.tmpDir, p, 'resmask_' + label + '.nii.gz')
+            if not os.path.exists(labelFileName) or force:
+                mask = sitk.ReadImage(label_file_name)
+                mask = resample(mask, is_label=True)
+                sitk.WriteImage(mask, labelFileName)
+            else:
+                mask = sitk.ReadImage(labelFileName)
+
+            # body mask
+            s = FindData(self.data[p]['Sequences'], { 'Type' : 'Mask' })
+            mask_file_name = s[0]['FileName']
+            maskFileName = os.path.join(self.tmpDir, 'res' + os.path.basename(mask_file_name))
             if not os.path.exists(maskFileName) or force:
                 mask = sitk.ReadImage(mask_file_name)
                 mask = resample(mask, is_label=True)
                 sitk.WriteImage(mask, maskFileName)
-            else:
-                mask = sitk.ReadImage(maskFileName)
-            # bbox = [ xstart, xend, ystart, yend, zstart, zend ].
+
+            # bbox = [ xstart, xend, ystart, yend, zstart, zend ]
             bbox = boundingBox(mask)
             img_size = img.GetSize()
             voxel_size = img.GetSpacing()
@@ -286,7 +300,7 @@ class MlData(object):
 
     def create_config(self, mode, label, numPatients=0):
         """
-        Training 
+        Training
         """
         f_channels = open('config/{}Channels_ct.cfg'.format(mode), 'w')
         f_labels = open('config/{}GtLabels.cfg'.format(mode), 'w')
@@ -395,18 +409,19 @@ if __name__ == '__main__':
     log = logging.getLogger(myName)
     log.setLevel(logging.INFO)
 
+    if platform.system() == 'Windows':
+        rootDir = r'E:\Data\TCIA\CT-ORG'
+    else:
+        rootDir = '/mnt/e/Data/BRATS2015'
+
     parser = argparse.ArgumentParser(description='')
     parser.add_argument('-d', '--debug', action='store_true', help='debug execution')
     parser.add_argument('-f', '--force', action='store_true', help='enforce recalculation (ignore existing results)')
     parser.add_argument('-i', '--inference', default='', help='run inference')
     parser.add_argument('-n', '--num', type=int, default=0, help='limit number of patients (0 = all)')
+    parser.add_argument('-r', '--root', default=rootDir, help='root directory for data ({})'.format(rootDir))
     parser.add_argument('-t', '--train', default='', help='run training on given label(s)')
     args = parser.parse_args(sys.argv[1:])
-
-    if platform.system() == 'Windows':
-        dataDir = r'E:\Data\TCIA\CT-ORG'
-    else:
-        dataDir = '/mnt/e/Data/BRATS2015'
 
     if args.debug:
         log.setLevel(logging.DEBUG)
@@ -415,7 +430,7 @@ if __name__ == '__main__':
     if args.inference:
         mode = 'test'
         label = args.inference
-    data = MlData(dataDir)
+    data = MlData(rootDir)
     data_file_name = 'ctorg_{}_data.json'.format(mode)
     if not args.force and os.path.exists(data_file_name):
         data.load(data_file_name)
@@ -424,10 +439,9 @@ if __name__ == '__main__':
         data.readData(mode)
         data.preprocess1(numPatients=args.num, force=args.force)
         data.preprocess2(numPatients=args.num, force=args.force)
-        data.preprocess3(label, numPatients=args.num, force=args.force)
+        data.preprocess3(label, crop_boundary=15.0, numPatients=args.num, force=True)
+        #data.preprocess4(label, numPatients=args.num, force=True)
         data.save(data_file_name)
-    data.preprocess3(label, crop_boundary=15.0, numPatients=args.num, force=True)
-    data.preprocess4(label, numPatients=args.num, force=True)
     #if args.train:
     #    data.train(args.train, numPatients=args.num)
     #if args.inference:
