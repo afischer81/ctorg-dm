@@ -107,12 +107,19 @@ def grayscaleOpen(image, type=sitk.sitkCross, radius=[1, 1, 1]):
     log.info('grayscaleOpen() finish')
     return result
 
-def normalize(image, mask, value=1000):
+def normalize(image, mask, mean_value=0.0, std_value=1.0, label=1):
     log.info('normalize() start')
     stat = statistics(image, mask)
-    normFactor = value / stat[1]['Mean']
-    log.info('  normFactor = {:.3f}'.format(normFactor))
-    result = shiftScale(image, scale=normFactor)
+    norm_offset = -stat[label]['Mean']
+    norm_scale = 1.0 / stat[label]['StdDev']
+    log.info('  shift={:.3f} scale={:.3f}'.format(norm_offset, norm_scale))
+    result = shiftScale(image, shift=norm_offset, scale=norm_scale)
+    result_array = sitk.GetArrayFromImage(result)
+    result_array[numpy.isnan(result_array)] = 0.0
+    result = sitk.GetImageFromArray(result_array)
+    result.CopyInformation(image)
+    #stat = statistics(result, mask)
+    #log.info('  mean={:.3f} sigma={:.3f}'.format(stat[label]['Mean'], stat[label]['StdDev']))
     log.info('normalize() finish')
     return result
 
@@ -128,11 +135,12 @@ def otsuThreshold(image, inside=0, outside=1, mask=1):
     log.info('otsuThreshold() finish')
     return result
 
-def pad(image, lower, upper):
+def pad(image, lower, upper, value=0):
     log.info('pad() start')
-    filter = sitk.MirrorPadImageFilter()
+    filter = sitk.ConstantPadImageFilter()
     filter.SetPadLowerBound(lower)
     filter.SetPadUpperBound(upper)
+    filter.SetConstant(value)
     result = filter.Execute(image)
     log.info('pad() finish')
     return result
