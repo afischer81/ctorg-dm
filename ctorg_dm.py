@@ -17,6 +17,7 @@ import sys
 import time
 
 import numpy
+import scipy
 from sklearn.model_selection import train_test_split
 
 from misc_utils import *
@@ -45,7 +46,7 @@ class MlData(object):
         """
         Get the list of files in a directory (including subdirs).
         """
-        
+
         fileList = []
         for root, dirs, files in os.walk(dir):
             if len(files) > 0:
@@ -86,9 +87,7 @@ class MlData(object):
             if not os.path.exists(pDir):
                 os.makedirs(pDir)
             maskFileName = os.path.join(self.tmpDir, p, 'mask.nii.gz')
-            if not force and os.path.exists(maskFileName):
-                mask = sitk.ReadImage(maskFileName)
-            else:
+            if force or not os.path.exists(maskFileName):
                 s = FindData(self.data[p]['Sequences'], { 'Type' : 'CT' })
                 img = sitk.ReadImage(s[0]['FileName'])
                 size = img.GetSize()
@@ -168,9 +167,12 @@ class MlData(object):
                     else:
                         log.warning('label {} empty'.format(labels[l]))
                 if os.path.exists(labelFileName):
+                    self.log.info('label {} {}'.format(l, labels[l]))
                     s = FindData(self.data[p]['Sequences'], { 'Type' : 'Label_' + labels[l] })
                     if len(s) == 0:
                         self.data[p]['Sequences'].append({ 'Type' : 'Label_' + labels[l], 'FileName' : labelFileName })
+                else:
+                    self.log.warning('no label {} {}'.format(l, labels[l]))
         log.info('preprocess2() finish')
 
     def preprocess3(self, label, crop_boundary, global_align=False, numPatients=0, force=False):
@@ -200,7 +202,7 @@ class MlData(object):
                     img = sitk.Cast(img, sitk.sitkUInt8)
                 sitk.WriteImage(img, f_out)
 
-        log.info('preprocess3() start') 
+        log.info('preprocess3() start')
         patientList = sorted(self.data.keys())
         if numPatients > 0:
             patientList = patientList[:numPatients]
@@ -211,10 +213,10 @@ class MlData(object):
             #
             for p in patientList:
                 log.info('  patient ' + p)
-                if not 'crop' in self.data[p].keys():
+                s = FindData(self.data[p]['Sequences'], { 'Type' : 'Label_' + label })
+                if len(s) == 0:
                     log.info('no label {} found for patient {}'.format(label, p))
                     continue
-                s = FindData(self.data[p]['Sequences'], { 'Type' : 'Label_' + label })
                 mask_file_name = s[0]['FileName']
                 mask = sitk.ReadImage(mask_file_name)
                 voxel_size = mask.GetSpacing()
@@ -224,19 +226,20 @@ class MlData(object):
                 for i in range(3):
                     object_size[i] = max(size[i], object_size[i])
         object_volume = numpy.prod(object_size)
-        log.info('physical object size {} volume {}'.format(object_size, object_volume))
+        if object_volume > 0.0:
+            log.info('physical object size {} volume {}'.format(object_size, object_volume))
         #
         # crop the identified object size relative to the center of the label object plus the margin
         # pad, if the image is exceeded
         #
         for p in patientList:
             log.info('  patient ' + p)
-            s = FindData(self.data[p]['Sequences'], { 'Type' : 'CT' })
-            img_file_name = s[0]['FileName']
             s = FindData(self.data[p]['Sequences'], { 'Type' : 'Label_' + label })
             if len(s) == 0:
                 log.info('no label {} found for patient {}'.format(label, p))
                 continue
+            s = FindData(self.data[p]['Sequences'], { 'Type' : 'CT' })
+            img_file_name = s[0]['FileName']
             label_file_name = s[0]['FileName']
             s = FindData(self.data[p]['Sequences'], { 'Type' : 'Mask' })
             mask_file_name = s[0]['FileName']
@@ -253,7 +256,6 @@ class MlData(object):
             img = sitk.ReadImage(img_file_name)
             img_size = numpy.array(img.GetSize())
             voxel_size = numpy.array(img.GetSpacing())
-
 
             # normalize to mean 0 std dev 1.0
             img = normalize(sitk.Cast(img, sitk.sitkFloat32), mask)
@@ -283,15 +285,15 @@ class MlData(object):
             target_size = (object_size + 2 * crop_boundary) / self.target_voxel_size
             target_size = (4 * numpy.round(target_size / 4 + 0.5)).astype(numpy.int16)
             log.info('{} crop {} {} pad {} {}'.format(p, crop_lower, crop_upper, pad_lower, pad_upper))
-            cropImgFileName = os.path.join(self.tmpDir, p, 'crop_img_' + label + '.nii.gz')
+            cropImgFileName = os.path.join(self.tmpDir, p, 'crop_img_' + p + '_' + label + '.nii.gz')
             crop_and_pad_and_resample(img, (crop_lower, crop_upper), (pad_lower, pad_upper), target_size, cropImgFileName, force=force)
             self.check_and_add_data(p, 'crop_img_' + label, cropImgFileName)
 
-            cropLabelFileName = os.path.join(self.tmpDir, p, 'crop_label_' + label + '.nii.gz')
+            cropLabelFileName = os.path.join(self.tmpDir, p, 'crop_label_' + p + '_' + label + '.nii.gz')
             crop_and_pad_and_resample(lbl, (crop_lower, crop_upper), (pad_lower, pad_upper), target_size, cropLabelFileName, is_label=True, force=force)
             self.check_and_add_data(p, 'crop_label_' + label, cropLabelFileName)
 
-            cropMaskFileName = os.path.join(self.tmpDir, p, 'crop_mask_' + label + '.nii.gz')
+            cropMaskFileName = os.path.join(self.tmpDir, p, 'crop_mask_' + p + '_' + label + '.nii.gz')
             crop_and_pad_and_resample(mask, (crop_lower, crop_upper), (pad_lower, pad_upper), target_size, cropMaskFileName, is_label=True, force=force)
             self.check_and_add_data(p, 'crop_mask_' + label, cropMaskFileName)
 
@@ -320,8 +322,7 @@ class MlData(object):
         f_channels = open('config/{}Channels_ct.cfg'.format(mode), 'w')
         f_labels = open('config/{}GtLabels.cfg'.format(mode), 'w')
         f_masks = open('config/{}RoiMasks.cfg'.format(mode), 'w')
-        if not mode == 'test':
-            f_pred =  open('config/{}NamesOfPredictions.cfg'.format(mode), 'w')
+        f_pred =  open('config/{}NamesOfPredictions.cfg'.format(mode), 'w')
         num_valid = 0
         for p in patient_list:
             log.info('  patient ' + p)
@@ -339,14 +340,12 @@ class MlData(object):
                 f_channels.write(img + '\n')
                 f_masks.write(mask + '\n')
                 f_labels.write(lbl + '\n')
-                if not mode == 'test':
-                    f_pred.write('{}_{}_predict.nii.gz'.format(os.path.basename(img).replace('.nii.gz', ''), label) + '\n')
+                f_pred.write('{}_{}_predict.nii.gz'.format(os.path.basename(img).replace('.nii.gz', ''), label) + '\n')
                 log.info('  OK')
                 num_valid += 1
             else:
                 log.warning('  skipped')
-        if not mode == 'test':
-            f_pred.close()
+        f_pred.close()
         f_masks.close()
         f_labels.close()
         f_channels.close()
@@ -373,52 +372,43 @@ class MlData(object):
         self.create_config('test', label, patientList)
         return
 
-def Inspect(patientData):
-    seq = patientData['Sequences']
-    # find x center of tumor
-    otseq = FindData(seq, { 'Type' : 'OT' })
-    ot = sitk.ReadImage(otseq[0]['FileName'])
-    bbox = boundingBox(ot)
-    xMin = 1000
-    xMax = 0
-    for i in list(bbox.keys()):
-        if i == 0:
-            continue
-        xMin = min([ bbox[i][0], xMin ])
-        xMax = max([ bbox[i][1], xMax ])
-    x = int(round((xMin + xMax) / 2))
-    print(patientData['Name'], x)
-    flairseq = FindData(seq, { 'Type' : 'Flair' })
-    flair = sitk.ReadImage(flairseq[0]['FileName'])
-    sitk_show(flair[x,:,::-1])
-    print('Flair')
-    t1seq = FindData(seq, { 'Type' : 'T1' })
-    t1 = sitk.ReadImage(t1seq[0]['FileName'])
-    sitk_show(t1[x,:,::-1])
-    print('T1')
-    t2seq = FindData(seq, { 'Type' : 'T2' })
-    t2 = sitk.ReadImage(t2seq[0]['FileName'])
-    sitk_show(t2[x,:,::-1])
-    print('T2')
-    sitk_show(ot[x,:,::-1])
-    print('OT')
-    maskseq = FindData(seq, { 'Type' : 'Mask' })
-    mask = sitk.ReadImage(maskseq[0]['FileName'])
-    # Rescale 't1smooth' and cast it to an integer type to match that of 'mask'
-    t1Int = sitk.Cast(sitk.RescaleIntensity(t1), mask.GetPixelID())
-    sitk_show(sitk.LabelOverlay(t1Int[x,:,::-1], mask[x,:,::-1]))
-    print('Mask')
-    sitk_show(sitk.LabelOverlay(t1Int[x,:,::-1], ot[x,:,::-1]))
-    print('Tumor')
+    def plot(self, label, p):
 
-    for img in [ flair, t1, t2 ]:
-        for voi in [ mask, ot ]:
-            stat = statistics(img, voi)
-            for label in list(stat.keys()):
-                print(label, stat[label]['Min'], stat[label]['Max'], stat[label]['Mean'])
-    #print statistics(t1, mask)[1]
-    #patches, labels = loadData(patientData['TrainData'])
-    #print len(patches), patches[0].shape, 'patches', len(labels), 'labels'
+        s = FindData(self.data[p]['Sequences'], { 'Type' : 'crop_img_' + label })
+        img_file_name = s[0]['FileName']
+        s = FindData(self.data[p]['Sequences'], { 'Type' : 'crop_label_' + label })
+        if len(s) == 0:
+            log.info('no label {} found for patient {}'.format(label, p))
+            return
+        label_file_name = s[0]['FileName']
+        s = FindData(self.data[p]['Sequences'], { 'Type' : 'crop_mask_' + label })
+        mask_file_name = s[0]['FileName']
+
+        img = sitk.ReadImage(img_file_name)
+        img = clamp(img, -5.0, 5.0)
+        lbl = sitk.ReadImage(label_file_name)
+        mask = sitk.ReadImage(mask_file_name)
+
+        stat = statistics(img, lbl)
+        log.info(stat)
+
+        lbl_array = sitk.GetArrayViewFromImage(lbl)
+        lbl_cog = scipy.ndimage.center_of_mass(lbl_array,labels=[1])
+        x = int(round(lbl_cog[2]))
+        y = int(round(lbl_cog[1]))
+        z = int(round(lbl_cog[0]))
+        print(x, y, z, img.GetSize(), lbl.GetSize())
+
+        sitk_show(img[x,:,::-1], dpi=80, clim=(-5,5))
+        sitk_show(img[:,y,::-1], dpi=80, clim=(-5,5))
+        sitk_show(img[:,:,z], dpi=80, clim=(-5,5))
+
+        img_sc = sitk.Cast(sitk.RescaleIntensity(img), lbl.GetPixelID())
+
+        sitk_show(sitk.LabelOverlay(img_sc[x,:,::-1], lbl[x,:,::-1], opacity=0.1), clim=(-5,5))
+        sitk_show(sitk.LabelOverlay(img_sc[:,y,::-1], lbl[:,y,::-1], opacity=0.1), clim=(-5,5))
+        sitk_show(sitk.LabelOverlay(img_sc[:,:,z], lbl[:,:,z], opacity=0.1), clim=(-5,5))
+
 
 if __name__ == '__main__':
     import argparse
@@ -439,6 +429,7 @@ if __name__ == '__main__':
     parser.add_argument('-f', '--force', action='store_true', help='enforce recalculation (ignore existing results)')
     parser.add_argument('-i', '--inference', default='', help='run inference')
     parser.add_argument('-n', '--num', type=int, default=0, help='limit number of patients (0 = all)')
+    parser.add_argument('--plot', type=str, default='', help='plot patient #')
     parser.add_argument('-p', '--pre', type=int, default=-1, help='execute preprocessing stage (-1: none, 0: all)')
     parser.add_argument('-r', '--root', default=rootDir, help='root directory for data ({})'.format(rootDir))
     parser.add_argument('--seed', type=int, default=42, help='randomization seed')
@@ -463,11 +454,15 @@ if __name__ == '__main__':
     if args.pre >= 0:
         if args.pre == 0 or args.pre == 1:
             data.preprocess1(numPatients=args.num, force=args.force)
+            data.save(data_file_name)
         if args.pre == 0 or args.pre == 2:
             data.preprocess2(numPatients=args.num, force=args.force)
+            data.save(data_file_name)
         if args.pre == 0 or args.pre == 3:
-            data.preprocess3(label, crop_boundary=15.0, global_align=True, numPatients=args.num, force=args.force)
-        data.save(data_file_name)
+            data.preprocess3(label, crop_boundary=15.0, global_align=False, numPatients=args.num, force=args.force)
+            data.save(data_file_name)
+    elif args.plot:
+        data.plot(label, args.plot)
     elif args.train:
         data.train(args.train, validation_fraction=args.validation_fraction, seed=args.seed, numPatients=args.num)
     elif args.inference:
